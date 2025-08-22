@@ -1,0 +1,908 @@
+---
+title: "MWAS_script.Rmd"
+author: "Andrew Lakamp"
+date: "2025-08-21"
+output: html_document
+---
+
+##Intro
+
+This is a markdown file detailing how to perform a metagenome-wide association study using the relative abundance of rumen open reading frames. This method uses Bayesian Ridge Regression to perform the analysis.
+
+We need to start by setting the directory to where the files phenotype file (e.g., Rumen_data_genotyped.txt) and the relative abundance table (e.g., ORF_RA_table_1.0.csv) are located. Then we load in all the packages we need. 
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = normalizePath("~/Documents/PhD/Microbiome/Subsetting/MWAS"))
+```
+
+Bayesian analysis in R relies on a random starting values and adjusts from there. To ensure we can get repeatable results, we need to set a seed, or a provided start value.
+
+```{r groundwork, echo=FALSE}
+library(data.table)
+library(dplyr)
+library(stringr)
+library(BGLR)
+library(coda)
+
+set.seed(3746)
+```
+
+Next, we read in all the data. This phenotype file does not have a feed efficiency trait, so we calculate feed to gain and add that to the phenotype file.
+
+```{r setup}
+data = fread("Rumen_data_genotyped.txt")
+
+#Feed to gain as our efficiency trait
+data$FtG = data$ADDMI_keep / data$ADG_keep
+
+ORF = fread("/home/alakamp/Documents/PhD/Microbiome/Subsetting/MWAS/ORF_RA_table_1.0.csv", header = T) %>%
+  filter(., Sample_ID %in% data$AnimalID)
+
+animal_names = ORF[,1]
+ORF[,1] = NULL
+ORF = as.matrix(ORF)
+rownames(ORF) = animal_names$Sample_ID
+ORF = ORF[match(data$AnimalID, rownames(ORF)), ]
+
+total_m2 = matrix(nrow = 3) %>%
+  as.data.frame()
+rownames(total_m2) = c("lower_limit", "mean", "upper_limit")
+
+```
+
+The ORF table comes with ORF names and animal names. The ORF names are column headers, so those are fine to leave. But the animal names are read in as the first column, so they need to be made into rownames and the original column removed. 
+
+The next step is VERY IMPORTANT: the order of the data and the order of ORF need to match. Otherwise, any results are incorrect.
+
+The last line bit of code makes a dataframe to store later results.
+
+##Analysis
+The data avaliable in this project contains information from animals fed different diets. Since we know diets can radically affect the metagenome and phenotypic performance, we are going to analyze this data in three different ways: using all data, using animals on the concentrate diet, and using animals on the forage diet.
+
+###Full Data
+Using the full set of data should identify ORF that are important for all animals regardless of their diet source.
+
+The first step in an analysis like this is always to center and scale the ORF matrix. This puts all of the ORF on an even footing for comparison.
+```{r center and scale, echo=F}
+ORFcs = scale(ORF, center = FALSE, scale = apply(ORF, 2, sd, na.rm = TRUE))
+```
+
+Next, we analyze each trait in succession, starting with average daily dry matter intake (ADDMI).
+####ADDMI
+We first need a model statement. This is a nested list. The first list contains fixed effect names and the object to get them from. In this case, Management_Group is being treated as a class effect, heterosis and the breed fractions are covariates. The model="FIXED" line tells the software to use flat (uniformative) priors. This lets the effect estimates of the fixed effects be influenced only by the data.
+
+The next part of the list is the random effect. For that, we have provided the centered and scaled ORF matrix. We are also also Bayesian Ridge Regression (model="BRR") which means all ORF will be used in each iteration and their effect will be penalized in a manner analogous to ridge regression.
+
+```{r model statement, echo=F}
+full_ADDMI_ETA<-list( list(~factor(Management_Group) + heterosis +
+                perANS + perHHS + perARS +
+                perSHS + perDSS + perBMS + 
+                perBRS + perBNS + perSGS + 
+                perBVS + perCHS + perCAS + 
+                perGVS + perLMS + perMAS +        
+                perSAS + perSMS + perTAS + 
+                perBVSo + perCHSo + perLMSo +
+                perHH +  perAN +  perSM +  
+                perCH +  perM2 +  perM3 + 
+                perRS +  perBV +  perBR +  
+                perXB +  perRO ,
+                data=data,model="FIXED"),
+           list(X = ORFcs, model="BRR")
+)
+```
+
+Finally, it is time to run the model. We are using 100,000 iterations with 5,000 burn-in. We are only going to keep the results from every 20th iteration (thin=20). All output files will have the prefix "full_ADDMI_".
+Note: this takes a while (15-30 minutes).
+
+```{r run model}
+full_ADDMI_model<-BGLR(y=data$ADDMI_keep,ETA=full_ADDMI_ETA, 
+                       nIter=100000, burnIn=5000, thin = 20, saveAt = "full_ADDMI_")
+```
+
+Now that the output is done, we look at the diagnostics to check that everything converged to our satisfaction. Let's start with the residual variance.
+
+The plot (a trace plot) should show each iteration bouncing around a central line. That means the model found that value repeatedly and moved back and forth with randomness.
+
+```{r residual trace plot}
+varE_full_ADDMI <-scan("full_ADDMI_varE.dat")
+plot(varE_full_ADDMI,type="o",col=2,cex=.5,
+     ylab=expression(sigma[epsilon]^2),
+     xlab="Sample",main="Residual Variance");
+abline(h=full_ADDMI_model$varE,col=4,lwd=2);
+abline(v=full_ADDMI_model$burnIn/full_ADDMI_model$thin,col=4)
+```
+
+The effective size value is a metric looking at how many of the iterations we kept were independent from each other. Higher is better and the maximum will be the length of varE_full_ADDMI. Anything over, say, 50 is probably good enough, expecially when we get to metagenomic variance. Anything under that, add more iterations and/or increase thinning.
+```{r residual effective size}
+effectiveSize(mcmc(varE_full_ADDMI))
+```
+
+Now we look at the same diagnostic output for the metagenomic variance.
+```{r metagenomic variance trace plot}
+lambda_full_ADDMI <-scan("full_ADDMI_ETA_2_varB.dat")
+plot(lambda_full_ADDMI, type="o", col=2, cex=.5,
+     xlab="Sample",ylab=expression(lambda),
+     main="Metagenome Variance");
+abline(h=full_ADDMI_model$ETA[[2]]$varB,col=4,lwd=2);
+abline(v=full_ADDMI_model$burnIn/full_ADDMI_model$thin,col=4)
+```
+
+```{r metagenomic effective size}
+effectiveSize(mcmc(lambda_full_ADDMI))
+```
+
+Okay, if the diagnostics looks good, we can start gathering our results.
+Here is the microbiability values. In a Bayesian framework, the microbiability is calculated for each iteration. We take the mean estimate and the upper and lower credible intervals (+/- 2x st. dev.).
+This returns the mean value to the user and stores the mean and credible interval values in the total m2 object.
+```{r microbiability}
+#metagenomic variance
+sigma2m_full_ADDMI <- ncol(ORFcs) * full_ADDMI_model$ETA[[2]]$varB
+# m2
+sigma2m_full_ADDMI / (sigma2m_full_ADDMI + full_ADDMI_model$varE)
+
+#Mean and sd m^2
+m2_full_ADDMI =  (ncol(ORFcs) * lambda_full_ADDMI) / ( (ncol(ORFcs) * lambda_full_ADDMI) + varE_full_ADDMI) 
+total_m2$Full_ADDMI = c(round(mean(m2_full_ADDMI) - 2*sd(m2_full_ADDMI), 2),
+                      round(mean(m2_full_ADDMI), 2),
+                      round(mean(m2_full_ADDMI) + 2*sd(m2_full_ADDMI), 2))
+total_m2$V1 = NULL
+```
+
+Next, we can grab the ORF effects. ORF effects have a mean effect of zero and their own variance. This means ORF effects are both positive and negative. To put everything on a level playing field and look at the largest effect ORF, we square the ORF effect estimate. That is the value we plot, but we save everything in case so we can use it later.
+```{r ORF effects}
+full_ADDMI_b <- full_ADDMI_model$ETA[[2]]$b
+full_ADDMI_SDb = full_ADDMI_model$ETA[[2]]$SD.b
+plot(full_ADDMI_b ^2, ylab="Estimated Squared-ORF Effect",
+     type="o",cex=.5,col="red",main="Full ADDMI ORF Effects",
+     xlab="ORF")
+points(full_ADDMI_b^2,cex=0.5,col="blue")
+
+full_ADDMI_ORF_effects = full_ADDMI_model$ETA[[2]]$b %>%
+  as.data.frame()
+colnames(full_ADDMI_ORF_effects) = "Effect"
+full_ADDMI_ORF_effects$Effect_sq = (full_ADDMI_ORF_effects$Effect)^2
+full_ADDMI_ORF_effects = full_ADDMI_ORF_effects %>%
+  arrange(desc(Effect_sq))
+full_ADDMI_ORF_effects$ORF_ID = rownames(full_ADDMI_ORF_effects)
+full_ADDMI_ORF_effects = full_ADDMI_ORF_effects %>%
+  relocate(ORF_ID, .before = Effect)
+```
+And, that's it. Now we just repeat the same steps for ADG and FtG.
+
+####ADG
+```{r model statement}
+full_ADG_ETA<-list( list(~factor(Management_Group) + heterosis +
+                             perANS + perHHS + perARS +
+                             perSHS + perDSS + perBMS + 
+                             perBRS + perBNS + perSGS + 
+                             perBVS + perCHS + perCAS + 
+                             perGVS + perLMS + perMAS +        
+                             perSAS + perSMS + perTAS + 
+                             perBVSo + perCHSo + perLMSo +
+                             perHH +  perAN +  perSM +  
+                             perCH +  perM2 +  perM3 + 
+                             perRS +  perBV +  perBR +  
+                             perXB +  perRO ,
+                           data=data,model="FIXED"),
+                      list(X = ORFcs, model="BRR")
+)
+```
+
+```{r run model}
+full_ADG_model<-BGLR(y=data$ADG_keep,ETA=full_ADG_ETA, 
+                     nIter=100000, burnIn=5000, thin = 20, saveAt = "full_ADG_")
+```
+
+```{r residual trace plot}
+varE_full_ADG <-scan("full_ADG_varE.dat")
+plot(varE_full_ADG, type="o", col=2, cex=.5,
+     ylab=expression(sigma[epsilon]^2),
+     xlab="Sample",main="Residual Variance");
+abline(h=full_ADG_model$varE,col=4,lwd=2);
+abline(v=full_ADG_model$burnIn/full_ADG_model$thin,col=4)
+```
+
+```{r residual effective size}
+effectiveSize(mcmc(varE_full_ADG))
+```
+
+```{r metagenomic variance trace plots}
+lambda_full_ADG <-scan("full_ADG_ETA_2_varB.dat")
+plot(lambda_full_ADG, type="o", col=2, cex=.5,
+     xlab="Sample",ylab=expression(lambda),
+     main="Metagenome Variance");
+abline(h=full_ADG_model$ETA[[2]]$varB,col=4,lwd=2);
+abline(v=full_ADG_model$burnIn/full_ADG_model$thin,col=4)
+```
+
+```{r metagenomic effective size}
+effectiveSize(mcmc(lambda_full_ADG))
+```
+
+```{r microbiability}
+sigma2m_full_ADG <- ncol(ORFcs) * full_ADG_model$ETA[[2]]$varB
+# m2
+sigma2m_full_ADG / (sigma2m_full_ADG + full_ADG_model$varE) #0.34
+
+#Mean and sd m^2
+m2_full_ADG =  (ncol(ORFcs) * lambda_full_ADG) / ( (ncol(ORFcs) * lambda_full_ADG) + varE_full_ADG) 
+total_m2$Full_ADG = c(round(mean(m2_full_ADG) - 2*sd(m2_full_ADG), 2),
+                      round(mean(m2_full_ADG), 2),
+                      round(mean(m2_full_ADG) + 2*sd(m2_full_ADG), 2))
+```
+
+```{r ORF effects}
+full_ADG_b <- full_ADG_model$ETA[[2]]$b
+full_ADG_SDb = full_ADG_model$ETA[[2]]$SD.b
+plot(full_ADG_b ^2, ylab="Estimated Squared-ORF Effect",
+     type="o",cex=.5,col="red",main="Full ADG ORF Effects",
+     xlab="ORF")
+points(full_ADG_b^2,cex=0.5,col="blue")
+
+full_ADG_ORF_effects = full_ADG_model$ETA[[2]]$b %>%
+  as.data.frame()
+colnames(full_ADG_ORF_effects) = "Effect"
+full_ADG_ORF_effects$Effect_sq = (full_ADG_ORF_effects$Effect)^2
+full_ADG_ORF_effects = full_ADG_ORF_effects %>%
+  arrange(desc(Effect_sq))
+```
+
+####FtG
+```{r model statement}
+full_FtG_ETA<-list( list(~factor(Management_Group) + heterosis +
+                           perANS + perHHS + perARS +
+                           perSHS + perDSS + perBMS + 
+                           perBRS + perBNS + perSGS + 
+                           perBVS + perCHS + perCAS + 
+                           perGVS + perLMS + perMAS +        
+                           perSAS + perSMS + perTAS + 
+                           perBVSo + perCHSo + perLMSo +
+                           perHH +  perAN +  perSM +  
+                           perCH +  perM2 +  perM3 + 
+                           perRS +  perBV +  perBR +  
+                           perXB +  perRO ,
+                         data=data,model="FIXED"),
+                    list(X = ORFcs, model="BRR")
+)
+```
+
+```{r run model}
+full_FtG_model<-BGLR(y=data$FtG,ETA=full_FtG_ETA, 
+                     nIter=100000, burnIn=5000, thin = 20, saveAt = "full_FtG_")
+```
+
+```{r residual trace plot}
+varE_full_FtG <-scan("full_FtG_varE.dat")
+plot(varE_full_FtG, type="o", col=2, cex=.5,
+     ylab=expression(sigma[epsilon]^2),
+     xlab="Sample",main="Residual Variance");
+abline(h=full_FtG_model$varE,col=4,lwd=2);
+abline(v=full_FtG_model$burnIn/full_FtG_model$thin,col=4)
+```
+
+```{r residual effective size}
+effectiveSize(mcmc(varE_full_FtG))
+```
+
+```{r metagenomic variance trace plot}
+lambda_full_FtG <-scan("full_FtG_ETA_2_varB.dat")
+plot(lambda_full_FtG, type="o", col=2, cex=.5,
+     xlab="Sample",ylab=expression(lambda),
+     main="Metagenome Variance");
+abline(h=full_FtG_model$ETA[[2]]$varB,col=4,lwd=2);
+abline(v=full_FtG_model$burnIn/full_FtG_model$thin,col=4)
+```
+
+```{r metagenomic effective size}
+effectiveSize(mcmc(lambda_full_FtG))
+```
+
+```{r microbiability}
+sigma2m_full_FtG <- ncol(ORFcs) * full_FtG_model$ETA[[2]]$varB
+# m2
+sigma2m_full_FtG / (sigma2m_full_FtG + full_FtG_model$varE) 
+
+#Mean and sd m^2
+m2_full_FtG =  (ncol(ORFcs) * lambda_full_FtG) / ( (ncol(ORFcs) * lambda_full_FtG) + varE_full_FtG) 
+total_m2$Full_FtG = c(round(mean(m2_full_FtG) - 2*sd(m2_full_FtG), 2),
+                      round(mean(m2_full_FtG), 2),
+                      round(mean(m2_full_FtG) + 2*sd(m2_full_FtG), 2))
+```
+
+```{r ORF effects}
+full_FtG_b <- full_FtG_model$ETA[[2]]$b
+full_FtG_SDb = full_FtG_model$ETA[[2]]$SD.b
+plot(full_FtG_b ^2, ylab="Estimated Squared-ORF Effect",
+     type="o",cex=.5,col="red",main="Full FtG ORF Effects",
+     xlab="ORF")
+points(full_FtG_b^2,cex=0.5,col="blue")
+
+full_FtG_ORF_effects = full_FtG_model$ETA[[2]]$b %>%
+  as.data.frame()
+colnames(full_FtG_ORF_effects) = "Effect"
+full_FtG_ORF_effects$Effect_sq = (full_FtG_ORF_effects$Effect)^2
+full_FtG_ORF_effects = full_FtG_ORF_effects %>%
+  arrange(desc(Effect_sq))
+full_FtG_ORF_effects$ORF_ID = rownames(full_FtG_ORF_effects)
+full_FtG_ORF_effects = full_FtG_ORF_effects %>%
+  relocate(ORF_ID, .before = Effect)
+```
+
+
+###Concentrate Data
+Cattle fed a high concentrate diet will have different a different rumen metagenome composition than those fed a primarily forage diet. By subsetting the data to just those on a concentrate diet, we should be able to determine which ORF have a strong effect on economically important traits for animals in a feedlot scenario.
+
+To begin with, we subset the data. Then, since some ORF are not present in 
+```{r new subsets}
+#Subset data
+concentrate_data = data %>%
+  filter(., Gender == "Steer")
+
+#Get ORF of only animals in this diet group
+ORFcs = ORF[rownames(ORF) %in% concentrate_data$AnimalID,]
+dim(concentrate_data)
+```
+
+Then, since some ORF are not present in the concentrate-fed animals, we remove those ORF. This prevents any center and scaling problems from occuring. Centering and scaling of ORF which, of course, needs to be done for this data independently.
+```{r new ORF set}
+#Get ORF of only animals in this diet group
+ORFcs = ORF[rownames(ORF) %in% concentrate_data$AnimalID,]
+
+#Remove any ORF which is NOT present in this diet group
+ORFcs = ORFcs[,colSums(ORFcs) != 0]
+
+#Center and scale remaining ORF
+ORFcs = scale(ORFcs, center = FALSE, scale = apply(ORFcs, 2, sd, na.rm = TRUE))
+```
+
+Before we start any analysis, we just put in some checks to make sure the data are in order.
+```{r logic checks}
+if(!(identical(rownames(ORFcs), as.character(concentrate_data$AnimalID)))){
+  stop("Data order does NOT match!")
+}
+
+if(!(identical(nrow(ORFcs), length(concentrate_data$AnimalID)))){
+  stop("Data order does NOT match!")
+}
+```
+
+Now we just repeat what we did with the full set.
+####ADDMI
+```{r model statement, echo=F}
+concentrate_ADDMI_ETA<-list( list(~factor(Management_Group) + heterosis +
+                perANS + perHHS + perARS +
+                perSHS + perDSS + perBMS + 
+                perBRS + perBNS + perSGS + 
+                perBVS + perCHS + perCAS + 
+                perGVS + perLMS + perMAS +        
+                perSAS + perSMS + perTAS + 
+                perBVSo + perCHSo + perLMSo +
+                perHH +  perAN +  perSM +  
+                perCH +  perM2 +  perM3 + 
+                perRS +  perBV +  perBR +  
+                perXB +  perRO ,
+                data=data,model="FIXED"),
+           list(X = ORFcs, model="BRR")
+)
+```
+
+```{r run model}
+concentrate_ADDMI_model<-BGLR(y=concentrate_data$ADDMI_keep,ETA=concentrate_ADDMI_ETA, 
+                       nIter=100000, burnIn=5000, thin = 20, saveAt = "concentrate_ADDMI_")
+```
+
+```{r residual trace plot}
+varE_concentrate_ADDMI <-scan("concentrate_ADDMI_varE.dat")
+plot(varE_concentrate_ADDMI,type="o",col=2,cex=.5,
+     ylab=expression(sigma[epsilon]^2),
+     xlab="Sample",main="Residual Variance");
+abline(h=concentrate_ADDMI_model$varE,col=4,lwd=2);
+abline(v=concentrate_ADDMI_model$burnIn/concentrate_ADDMI_model$thin,col=4)
+```
+
+```{r residual effective size}
+effectiveSize(mcmc(varE_concentrate_ADDMI))
+```
+
+```{r metagenomic variance trace plot}
+lambda_concentrate_ADDMI <-scan("concentrate_ADDMI_ETA_2_varB.dat")
+plot(lambda_concentrate_ADDMI, type="o", col=2, cex=.5,
+     xlab="Sample",ylab=expression(lambda),
+     main="Metagenome Variance");
+abline(h=concentrate_ADDMI_model$ETA[[2]]$varB,col=4,lwd=2);
+abline(v=concentrate_ADDMI_model$burnIn/concentrate_ADDMI_model$thin,col=4)
+```
+
+```{r metagenomic effective size}
+effectiveSize(mcmc(lambda_concentrate_ADDMI))
+```
+
+```{r microbiability}
+#metagenomic variance
+sigma2m_concentrate_ADDMI <- ncol(ORFcs) * concentrate_ADDMI_model$ETA[[2]]$varB
+# m2
+sigma2m_concentrate_ADDMI / (sigma2m_concentrate_ADDMI + concentrate_ADDMI_model$varE)
+
+#Mean and sd m^2
+m2_concentrate_ADDMI =  (ncol(ORFcs) * lambda_concentrate_ADDMI) / ( (ncol(ORFcs) * lambda_concentrate_ADDMI) + varE_concentrate_ADDMI) 
+total_m2$concentrate_ADDMI = c(round(mean(m2_concentrate_ADDMI) - 2*sd(m2_concentrate_ADDMI), 2),
+                      round(mean(m2_concentrate_ADDMI), 2),
+                      round(mean(m2_concentrate_ADDMI) + 2*sd(m2_concentrate_ADDMI), 2))
+total_m2$V1 = NULL
+```
+
+```{r ORF effects}
+concentrate_ADDMI_b <- concentrate_ADDMI_model$ETA[[2]]$b
+concentrate_ADDMI_SDb = concentrate_ADDMI_model$ETA[[2]]$SD.b
+plot(concentrate_ADDMI_b ^2, ylab="Estimated Squared-ORF Effect",
+     type="o",cex=.5,col="red",main="concentrate ADDMI ORF Effects",
+     xlab="ORF")
+points(concentrate_ADDMI_b^2,cex=0.5,col="blue")
+
+concentrate_ADDMI_ORF_effects = concentrate_ADDMI_model$ETA[[2]]$b %>%
+  as.data.frame()
+colnames(concentrate_ADDMI_ORF_effects) = "Effect"
+concentrate_ADDMI_ORF_effects$Effect_sq = (concentrate_ADDMI_ORF_effects$Effect)^2
+concentrate_ADDMI_ORF_effects = concentrate_ADDMI_ORF_effects %>%
+  arrange(desc(Effect_sq))
+concentrate_ADDMI_ORF_effects$ORF_ID = rownames(concentrate_ADDMI_ORF_effects)
+concentrate_ADDMI_ORF_effects = concentrate_ADDMI_ORF_effects %>%
+  relocate(ORF_ID, .before = Effect)
+```
+
+####ADG
+```{r model statement}
+concentrate_ADG_ETA<-list( list(~factor(Management_Group) + heterosis +
+                             perANS + perHHS + perARS +
+                             perSHS + perDSS + perBMS + 
+                             perBRS + perBNS + perSGS + 
+                             perBVS + perCHS + perCAS + 
+                             perGVS + perLMS + perMAS +        
+                             perSAS + perSMS + perTAS + 
+                             perBVSo + perCHSo + perLMSo +
+                             perHH +  perAN +  perSM +  
+                             perCH +  perM2 +  perM3 + 
+                             perRS +  perBV +  perBR +  
+                             perXB +  perRO ,
+                           data=data,model="FIXED"),
+                      list(X = ORFcs, model="BRR")
+)
+```
+
+```{r run model}
+concentrate_ADG_model<-BGLR(y=concentrate_data$ADG_keep,ETA=concentrate_ADG_ETA, 
+                     nIter=100000, burnIn=5000, thin = 20, saveAt = "concentrate_ADG_")
+```
+
+```{r residual trace plot}
+varE_concentrate_ADG <-scan("concentrate_ADG_varE.dat")
+plot(varE_concentrate_ADG, type="o", col=2, cex=.5,
+     ylab=expression(sigma[epsilon]^2),
+     xlab="Sample",main="Residual Variance");
+abline(h=concentrate_ADG_model$varE,col=4,lwd=2);
+abline(v=concentrate_ADG_model$burnIn/concentrate_ADG_model$thin,col=4)
+```
+
+```{r residual effective size}
+effectiveSize(mcmc(varE_concentrate_ADG))
+```
+
+```{r metagenomic variance trace plots}
+lambda_concentrate_ADG <-scan("concentrate_ADG_ETA_2_varB.dat")
+plot(lambda_concentrate_ADG, type="o", col=2, cex=.5,
+     xlab="Sample",ylab=expression(lambda),
+     main="Metagenome Variance");
+abline(h=concentrate_ADG_model$ETA[[2]]$varB,col=4,lwd=2);
+abline(v=concentrate_ADG_model$burnIn/concentrate_ADG_model$thin,col=4)
+```
+
+```{r metagenomic effective size}
+effectiveSize(mcmc(lambda_concentrate_ADG))
+```
+
+```{r microbiability}
+sigma2m_concentrate_ADG <- ncol(ORFcs) * concentrate_ADG_model$ETA[[2]]$varB
+# m2
+sigma2m_concentrate_ADG / (sigma2m_concentrate_ADG + concentrate_ADG_model$varE) #0.34
+
+#Mean and sd m^2
+m2_concentrate_ADG =  (ncol(ORFcs) * lambda_concentrate_ADG) / ( (ncol(ORFcs) * lambda_concentrate_ADG) + varE_concentrate_ADG) 
+total_m2$concentrate_ADG = c(round(mean(m2_concentrate_ADG) - 2*sd(m2_concentrate_ADG), 2),
+                      round(mean(m2_concentrate_ADG), 2),
+                      round(mean(m2_concentrate_ADG) + 2*sd(m2_concentrate_ADG), 2))
+```
+
+```{r ORF effects}
+concentrate_ADG_b <- concentrate_ADG_model$ETA[[2]]$b
+concentrate_ADG_SDb = concentrate_ADG_model$ETA[[2]]$SD.b
+plot(concentrate_ADG_b ^2, ylab="Estimated Squared-ORF Effect",
+     type="o",cex=.5,col="red",main="concentrate ADG ORF Effects",
+     xlab="ORF")
+points(concentrate_ADG_b^2,cex=0.5,col="blue")
+
+concentrate_ADG_ORF_effects = concentrate_ADG_model$ETA[[2]]$b %>%
+  as.data.frame()
+colnames(concentrate_ADG_ORF_effects) = "Effect"
+concentrate_ADG_ORF_effects$Effect_sq = (concentrate_ADG_ORF_effects$Effect)^2
+concentrate_ADG_ORF_effects = concentrate_ADG_ORF_effects %>%
+  arrange(desc(Effect_sq))
+```
+
+####FtG
+```{r model statement}
+concentrate_FtG_ETA<-list( list(~factor(Management_Group) + heterosis +
+                           perANS + perHHS + perARS +
+                           perSHS + perDSS + perBMS + 
+                           perBRS + perBNS + perSGS + 
+                           perBVS + perCHS + perCAS + 
+                           perGVS + perLMS + perMAS +        
+                           perSAS + perSMS + perTAS + 
+                           perBVSo + perCHSo + perLMSo +
+                           perHH +  perAN +  perSM +  
+                           perCH +  perM2 +  perM3 + 
+                           perRS +  perBV +  perBR +  
+                           perXB +  perRO ,
+                         data=data,model="FIXED"),
+                    list(X = ORFcs, model="BRR")
+)
+```
+
+```{r run model}
+concentrate_FtG_model<-BGLR(y=concentrate_data$FtG,ETA=concentrate_FtG_ETA, 
+                     nIter=100000, burnIn=5000, thin = 20, saveAt = "concentrate_FtG_")
+```
+
+```{r residual trace plot}
+varE_concentrate_FtG <-scan("concentrate_FtG_varE.dat")
+plot(varE_concentrate_FtG, type="o", col=2, cex=.5,
+     ylab=expression(sigma[epsilon]^2),
+     xlab="Sample",main="Residual Variance");
+abline(h=concentrate_FtG_model$varE,col=4,lwd=2);
+abline(v=concentrate_FtG_model$burnIn/concentrate_FtG_model$thin,col=4)
+```
+
+```{r residual effective size}
+effectiveSize(mcmc(varE_concentrate_FtG))
+```
+
+```{r metagenomic variance trace plot}
+lambda_concentrate_FtG <-scan("concentrate_FtG_ETA_2_varB.dat")
+plot(lambda_concentrate_FtG, type="o", col=2, cex=.5,
+     xlab="Sample",ylab=expression(lambda),
+     main="Metagenome Variance");
+abline(h=concentrate_FtG_model$ETA[[2]]$varB,col=4,lwd=2);
+abline(v=concentrate_FtG_model$burnIn/concentrate_FtG_model$thin,col=4)
+```
+
+```{r metagenomic effective size}
+effectiveSize(mcmc(lambda_concentrate_FtG))
+```
+
+```{r microbiability}
+sigma2m_concentrate_FtG <- ncol(ORFcs) * concentrate_FtG_model$ETA[[2]]$varB
+# m2
+sigma2m_concentrate_FtG / (sigma2m_concentrate_FtG + concentrate_FtG_model$varE) 
+
+#Mean and sd m^2
+m2_concentrate_FtG =  (ncol(ORFcs) * lambda_concentrate_FtG) / ( (ncol(ORFcs) * lambda_concentrate_FtG) + varE_concentrate_FtG) 
+total_m2$concentrate_FtG = c(round(mean(m2_concentrate_FtG) - 2*sd(m2_concentrate_FtG), 2),
+                      round(mean(m2_concentrate_FtG), 2),
+                      round(mean(m2_concentrate_FtG) + 2*sd(m2_concentrate_FtG), 2))
+```
+
+```{r ORF effects}
+concentrate_FtG_b <- concentrate_FtG_model$ETA[[2]]$b
+concentrate_FtG_SDb = concentrate_FtG_model$ETA[[2]]$SD.b
+plot(concentrate_FtG_b ^2, ylab="Estimated Squared-ORF Effect",
+     type="o",cex=.5,col="red",main="concentrate FtG ORF Effects",
+     xlab="ORF")
+points(concentrate_FtG_b^2,cex=0.5,col="blue")
+
+concentrate_FtG_ORF_effects = concentrate_FtG_model$ETA[[2]]$b %>%
+  as.data.frame()
+colnames(concentrate_FtG_ORF_effects) = "Effect"
+concentrate_FtG_ORF_effects$Effect_sq = (concentrate_FtG_ORF_effects$Effect)^2
+concentrate_FtG_ORF_effects = concentrate_FtG_ORF_effects %>%
+  arrange(desc(Effect_sq))
+concentrate_FtG_ORF_effects$ORF_ID = rownames(concentrate_FtG_ORF_effects)
+concentrate_FtG_ORF_effects = concentrate_FtG_ORF_effects %>%
+  relocate(ORF_ID, .before = Effect)
+```
+
+###Forage Data
+Forage fed animals have a different rumen metagenome composition than concentrate fed animals. It is often more diverse to have the ability to digest the variety of plant matter the animal encounters.
+
+We begin the same way as before, by subsetting the data.
+```{r new subsets}
+#Subset data
+forage_data = data %>%
+  filter(., Gender == "Heifer")
+
+#Get ORF of only animals in this diet group
+ORFcs = ORF[rownames(ORF) %in% forage_data$AnimalID,]
+dim(forage_data)
+```
+
+Then, since some ORF are not present in the forage-fed animals, we remove those ORF. This prevents any center and scaling problems from occuring. Centering and scaling of ORF which, of course, needs to be done for this data independently.
+```{r new ORF set}
+#Get ORF of only animals in this diet group
+ORFcs = ORF[rownames(ORF) %in% forage_data$AnimalID,]
+
+#Remove any ORF which is NOT present in this diet group
+ORFcs = ORFcs[,colSums(ORFcs) != 0]
+
+#Center and scale remaining ORF
+ORFcs = scale(ORFcs, center = FALSE, scale = apply(ORFcs, 2, sd, na.rm = TRUE))
+```
+
+Before we start any analysis, we just put in some checks to make sure the data are in order.
+```{r logic checks}
+if(!(identical(rownames(ORFcs), as.character(forage_data$AnimalID)))){
+  stop("Data order does NOT match!")
+}
+
+if(!(identical(nrow(ORFcs), length(forage_data$AnimalID)))){
+  stop("Data order does NOT match!")
+}
+```
+
+Now we just repeat what we did with the full and concentrate sets.
+####ADDMI
+```{r model statement, echo=F}
+forage_ADDMI_ETA<-list( list(~factor(Management_Group) + heterosis +
+                perANS + perHHS + perARS +
+                perSHS + perDSS + perBMS + 
+                perBRS + perBNS + perSGS + 
+                perBVS + perCHS + perCAS + 
+                perGVS + perLMS + perMAS +        
+                perSAS + perSMS + perTAS + 
+                perBVSo + perCHSo + perLMSo +
+                perHH +  perAN +  perSM +  
+                perCH +  perM2 +  perM3 + 
+                perRS +  perBV +  perBR +  
+                perXB +  perRO ,
+                data=data,model="FIXED"),
+           list(X = ORFcs, model="BRR")
+)
+```
+
+```{r run model}
+forage_ADDMI_model<-BGLR(y=forage_data$ADDMI_keep,ETA=forage_ADDMI_ETA, 
+                       nIter=100000, burnIn=5000, thin = 20, saveAt = "forage_ADDMI_")
+```
+
+```{r residual trace plot}
+varE_forage_ADDMI <-scan("forage_ADDMI_varE.dat")
+plot(varE_forage_ADDMI,type="o",col=2,cex=.5,
+     ylab=expression(sigma[epsilon]^2),
+     xlab="Sample",main="Residual Variance");
+abline(h=forage_ADDMI_model$varE,col=4,lwd=2);
+abline(v=forage_ADDMI_model$burnIn/forage_ADDMI_model$thin,col=4)
+```
+
+```{r residual effective size}
+effectiveSize(mcmc(varE_forage_ADDMI))
+```
+
+```{r metagenomic variance trace plot}
+lambda_forage_ADDMI <-scan("forage_ADDMI_ETA_2_varB.dat")
+plot(lambda_forage_ADDMI, type="o", col=2, cex=.5,
+     xlab="Sample",ylab=expression(lambda),
+     main="Metagenome Variance");
+abline(h=forage_ADDMI_model$ETA[[2]]$varB,col=4,lwd=2);
+abline(v=forage_ADDMI_model$burnIn/forage_ADDMI_model$thin,col=4)
+```
+
+```{r metagenomic effective size}
+effectiveSize(mcmc(lambda_forage_ADDMI))
+```
+
+```{r microbiability}
+#metagenomic variance
+sigma2m_forage_ADDMI <- ncol(ORFcs) * forage_ADDMI_model$ETA[[2]]$varB
+# m2
+sigma2m_forage_ADDMI / (sigma2m_forage_ADDMI + forage_ADDMI_model$varE)
+
+#Mean and sd m^2
+m2_forage_ADDMI =  (ncol(ORFcs) * lambda_forage_ADDMI) / ( (ncol(ORFcs) * lambda_forage_ADDMI) + varE_forage_ADDMI) 
+total_m2$forage_ADDMI = c(round(mean(m2_forage_ADDMI) - 2*sd(m2_forage_ADDMI), 2),
+                      round(mean(m2_forage_ADDMI), 2),
+                      round(mean(m2_forage_ADDMI) + 2*sd(m2_forage_ADDMI), 2))
+total_m2$V1 = NULL
+```
+
+```{r ORF effects}
+forage_ADDMI_b <- forage_ADDMI_model$ETA[[2]]$b
+forage_ADDMI_SDb = forage_ADDMI_model$ETA[[2]]$SD.b
+plot(forage_ADDMI_b ^2, ylab="Estimated Squared-ORF Effect",
+     type="o",cex=.5,col="red",main="forage ADDMI ORF Effects",
+     xlab="ORF")
+points(forage_ADDMI_b^2,cex=0.5,col="blue")
+
+forage_ADDMI_ORF_effects = forage_ADDMI_model$ETA[[2]]$b %>%
+  as.data.frame()
+colnames(forage_ADDMI_ORF_effects) = "Effect"
+forage_ADDMI_ORF_effects$Effect_sq = (forage_ADDMI_ORF_effects$Effect)^2
+forage_ADDMI_ORF_effects = forage_ADDMI_ORF_effects %>%
+  arrange(desc(Effect_sq))
+forage_ADDMI_ORF_effects$ORF_ID = rownames(forage_ADDMI_ORF_effects)
+forage_ADDMI_ORF_effects = forage_ADDMI_ORF_effects %>%
+  relocate(ORF_ID, .before = Effect)
+```
+
+####ADG
+```{r model statement}
+forage_ADG_ETA<-list( list(~factor(Management_Group) + heterosis +
+                             perANS + perHHS + perARS +
+                             perSHS + perDSS + perBMS + 
+                             perBRS + perBNS + perSGS + 
+                             perBVS + perCHS + perCAS + 
+                             perGVS + perLMS + perMAS +        
+                             perSAS + perSMS + perTAS + 
+                             perBVSo + perCHSo + perLMSo +
+                             perHH +  perAN +  perSM +  
+                             perCH +  perM2 +  perM3 + 
+                             perRS +  perBV +  perBR +  
+                             perXB +  perRO ,
+                           data=data,model="FIXED"),
+                      list(X = ORFcs, model="BRR")
+)
+```
+
+```{r run model}
+forage_ADG_model<-BGLR(y=forage_data$ADG_keep,ETA=forage_ADG_ETA, 
+                     nIter=100000, burnIn=5000, thin = 20, saveAt = "forage_ADG_")
+```
+
+```{r residual trace plot}
+varE_forage_ADG <-scan("forage_ADG_varE.dat")
+plot(varE_forage_ADG, type="o", col=2, cex=.5,
+     ylab=expression(sigma[epsilon]^2),
+     xlab="Sample",main="Residual Variance");
+abline(h=forage_ADG_model$varE,col=4,lwd=2);
+abline(v=forage_ADG_model$burnIn/forage_ADG_model$thin,col=4)
+```
+
+```{r residual effective size}
+effectiveSize(mcmc(varE_forage_ADG))
+```
+
+```{r metagenomic variance trace plots}
+lambda_forage_ADG <-scan("forage_ADG_ETA_2_varB.dat")
+plot(lambda_forage_ADG, type="o", col=2, cex=.5,
+     xlab="Sample",ylab=expression(lambda),
+     main="Metagenome Variance");
+abline(h=forage_ADG_model$ETA[[2]]$varB,col=4,lwd=2);
+abline(v=forage_ADG_model$burnIn/forage_ADG_model$thin,col=4)
+```
+
+```{r metagenomic effective size}
+effectiveSize(mcmc(lambda_forage_ADG))
+```
+
+```{r microbiability}
+sigma2m_forage_ADG <- ncol(ORFcs) * forage_ADG_model$ETA[[2]]$varB
+# m2
+sigma2m_forage_ADG / (sigma2m_forage_ADG + forage_ADG_model$varE) #0.34
+
+#Mean and sd m^2
+m2_forage_ADG =  (ncol(ORFcs) * lambda_forage_ADG) / ( (ncol(ORFcs) * lambda_forage_ADG) + varE_forage_ADG) 
+total_m2$forage_ADG = c(round(mean(m2_forage_ADG) - 2*sd(m2_forage_ADG), 2),
+                      round(mean(m2_forage_ADG), 2),
+                      round(mean(m2_forage_ADG) + 2*sd(m2_forage_ADG), 2))
+```
+
+```{r ORF effects}
+forage_ADG_b <- forage_ADG_model$ETA[[2]]$b
+forage_ADG_SDb = forage_ADG_model$ETA[[2]]$SD.b
+plot(forage_ADG_b ^2, ylab="Estimated Squared-ORF Effect",
+     type="o",cex=.5,col="red",main="forage ADG ORF Effects",
+     xlab="ORF")
+points(forage_ADG_b^2,cex=0.5,col="blue")
+
+forage_ADG_ORF_effects = forage_ADG_model$ETA[[2]]$b %>%
+  as.data.frame()
+colnames(forage_ADG_ORF_effects) = "Effect"
+forage_ADG_ORF_effects$Effect_sq = (forage_ADG_ORF_effects$Effect)^2
+forage_ADG_ORF_effects = forage_ADG_ORF_effects %>%
+  arrange(desc(Effect_sq))
+```
+
+####FtG
+```{r model statement}
+forage_FtG_ETA<-list( list(~factor(Management_Group) + heterosis +
+                           perANS + perHHS + perARS +
+                           perSHS + perDSS + perBMS + 
+                           perBRS + perBNS + perSGS + 
+                           perBVS + perCHS + perCAS + 
+                           perGVS + perLMS + perMAS +        
+                           perSAS + perSMS + perTAS + 
+                           perBVSo + perCHSo + perLMSo +
+                           perHH +  perAN +  perSM +  
+                           perCH +  perM2 +  perM3 + 
+                           perRS +  perBV +  perBR +  
+                           perXB +  perRO ,
+                         data=data,model="FIXED"),
+                    list(X = ORFcs, model="BRR")
+)
+```
+
+```{r run model}
+forage_FtG_model<-BGLR(y=forage_data$FtG,ETA=forage_FtG_ETA, 
+                     nIter=100000, burnIn=5000, thin = 20, saveAt = "forage_FtG_")
+```
+
+```{r residual trace plot}
+varE_forage_FtG <-scan("forage_FtG_varE.dat")
+plot(varE_forage_FtG, type="o", col=2, cex=.5,
+     ylab=expression(sigma[epsilon]^2),
+     xlab="Sample",main="Residual Variance");
+abline(h=forage_FtG_model$varE,col=4,lwd=2);
+abline(v=forage_FtG_model$burnIn/forage_FtG_model$thin,col=4)
+```
+
+```{r residual effective size}
+effectiveSize(mcmc(varE_forage_FtG))
+```
+
+```{r metagenomic variance trace plot}
+lambda_forage_FtG <-scan("forage_FtG_ETA_2_varB.dat")
+plot(lambda_forage_FtG, type="o", col=2, cex=.5,
+     xlab="Sample",ylab=expression(lambda),
+     main="Metagenome Variance");
+abline(h=forage_FtG_model$ETA[[2]]$varB,col=4,lwd=2);
+abline(v=forage_FtG_model$burnIn/forage_FtG_model$thin,col=4)
+```
+
+```{r metagenomic effective size}
+effectiveSize(mcmc(lambda_forage_FtG))
+```
+
+```{r microbiability}
+sigma2m_forage_FtG <- ncol(ORFcs) * forage_FtG_model$ETA[[2]]$varB
+# m2
+sigma2m_forage_FtG / (sigma2m_forage_FtG + forage_FtG_model$varE) 
+
+#Mean and sd m^2
+m2_forage_FtG =  (ncol(ORFcs) * lambda_forage_FtG) / ( (ncol(ORFcs) * lambda_forage_FtG) + varE_forage_FtG) 
+total_m2$forage_FtG = c(round(mean(m2_forage_FtG) - 2*sd(m2_forage_FtG), 2),
+                      round(mean(m2_forage_FtG), 2),
+                      round(mean(m2_forage_FtG) + 2*sd(m2_forage_FtG), 2))
+```
+
+```{r ORF effects}
+forage_FtG_b <- forage_FtG_model$ETA[[2]]$b
+forage_FtG_SDb = forage_FtG_model$ETA[[2]]$SD.b
+plot(forage_FtG_b ^2, ylab="Estimated Squared-ORF Effect",
+     type="o",cex=.5,col="red",main="forage FtG ORF Effects",
+     xlab="ORF")
+points(forage_FtG_b^2,cex=0.5,col="blue")
+
+forage_FtG_ORF_effects = forage_FtG_model$ETA[[2]]$b %>%
+  as.data.frame()
+colnames(forage_FtG_ORF_effects) = "Effect"
+forage_FtG_ORF_effects$Effect_sq = (forage_FtG_ORF_effects$Effect)^2
+forage_FtG_ORF_effects = forage_FtG_ORF_effects %>%
+  arrange(desc(Effect_sq))
+forage_FtG_ORF_effects$ORF_ID = rownames(forage_FtG_ORF_effects)
+forage_FtG_ORF_effects = forage_FtG_ORF_effects %>%
+  relocate(ORF_ID, .before = Effect)
+```
+
+##Conclusion
+That brings us to the conclusion of the actual analysis. We are going to write out the results in to an Excel spreadsheet where each set of results is it's own sheet.
+```{r write out results}
+library(openxlsx)
+write.xlsx(list("Microbiability" = total_m2, 
+                "Full_ADDMI_ORF_Eff" = full_ADDMI_ORF_effects, 
+                "Full_ADG_ORF_Eff" = full_ADG_ORF_effects,
+                "Full_FtG_ORF_Eff" = full_FtG_ORF_effects,
+                "Conc_ADDMI_ORF_Eff" = concentrate_ADDMI_ORF_effects, 
+                "Conc_ADG_ORF_Eff" = concentrate_ADG_ORF_effects,
+                "Conc_FtG_ORF_Eff" = concentrate_FtG_ORF_effects,
+                "Forage_ADDMI_ORF_Eff" = forage_ADDMI_ORF_effects, 
+                "Forage_ADG_ORF_Eff" = forage_ADG_ORF_effects,
+                "Forage_FtG_ORF_Eff" = forage_FtG_ORF_effects),
+                "Rumen_MWAS_Results.xlsx")
+```
+

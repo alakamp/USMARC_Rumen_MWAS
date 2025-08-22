@@ -1,0 +1,419 @@
+---
+title: "Analyzing_results.Rmd"
+author: "Andrew Lakamp"
+date: "2025-08-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+##Beginning
+This file contains all the information relevant to anlayzing the output from a metagenome-wide association study from MWAS_script.Rmd.
+
+All the groundwork needs to come first.
+```{r groundwork}
+setwd("~/Documents/PhD/Microbiome/Subsetting/MWAS")
+library(data.table)
+library(dplyr)
+library(stringr)
+library(openxlsx)
+library(ggvenn)
+```
+Now we can read in the outputs from the Excel sheet with the results we made. Each sheet will be a data-frame.
+```{r read-in data, echo=F}
+sheets = readxl::excel_sheets("Rumen_MWAS_Results.xlsx")
+
+MWAS_sheets = list()
+for(i in sheets){
+  MWAS_sheets[[length(MWAS_sheets) + 1]] = read.xlsx("Rumen_MWAS_Results.xlsx", sheet = i)
+}
+names(MWAS_sheets) = sheets
+list2env(MWAS_sheets, envir = globalenv())
+rm(i, sheets, MWAS_sheets)
+
+```
+
+##Significant ORF overlap within set between traits
+We have three sets of data to work with: Full, Concentrate, and Forage.
+We also have three tratis of interest: average daily dry matter intake (ADDMI), average daily gain (ADG), and feed-to-gain ratio (FtG).
+In this section, we will be looking at the ORF that are important to each trait within a set. We will also look at which ORF are important to multiple traits within a set.
+
+Significant ORF will be those that have a squared effect in the top 1% of all ORF effects for a given trait/set combination.
+
+###Full
+We start by creating a list of ORF that are significant for each trait in the Full set.
+```{r significant ORF}
+Full_ORF = list(
+  top_Full_ADDMI = Full_ADDMI_ORF_Eff %>%
+    arrange(., desc(Effect_sq)) %>%
+    filter(., Effect_sq > quantile(Effect_sq, 0.99)) %>%
+    select(., ORF_ID) %>%
+    unlist()
+  ,
+  top_Full_ADG = Full_ADG_ORF_Eff %>%
+    arrange(., desc(Effect_sq)) %>%
+    filter(., Effect_sq > quantile(Effect_sq, 0.99)) %>%
+    select(., ORF_ID) %>%
+    unlist()
+  ,
+  top_Full_FtG = Full_FtG_ORF_Eff %>%
+    arrange(., desc(Effect_sq)) %>%
+    filter(., Effect_sq > quantile(Effect_sq, 0.99)) %>%
+    select(., ORF_ID) %>%
+    unlist()
+)
+```
+
+Now we can reduce those ORF to those that are significant for all the traits together.
+```{r all significant}
+Full_all <- Reduce(intersect, Full_ORF)
+```
+
+Next, we examine pair-wise comparisons.
+```{r pairwise}
+ADDMI_ADG_Full <- setdiff(intersect(Full_ORF$top_Full_ADDMI, Full_ORF$top_Full_ADG), Full_all)
+ADDMI_FtG_Full <- setdiff(intersect(Full_ORF$top_Full_ADDMI, Full_ORF$top_Full_FtG), Full_all)
+ADG_FtG_Full <- setdiff(intersect(Full_ORF$top_Full_ADG, Full_ORF$top_Full_FtG), Full_all)
+```
+
+Finally, we can put all this information in a three-part Venn diagram.
+```{r Venn}
+ggvenn(Full_ORF)
+```
+
+###Concentrate
+Now we can do the same thing for the Concentrate set of ORF.
+```{r significant ORF}
+Conc_ORF = list(
+  top_Conc_ADDMI = Conc_ADDMI_ORF_Eff %>%
+    arrange(., desc(Effect_sq)) %>%
+    filter(., Effect_sq > quantile(Effect_sq, 0.99)) %>%
+    select(., ORF_ID) %>%
+    unlist()
+  ,
+  top_Conc_ADG = Conc_ADG_ORF_Eff %>%
+    arrange(., desc(Effect_sq)) %>%
+    filter(., Effect_sq > quantile(Effect_sq, 0.99)) %>%
+    select(., ORF_ID) %>%
+    unlist()
+  ,
+  top_Conc_FtG = Conc_FtG_ORF_Eff %>%
+    arrange(., desc(Effect_sq)) %>%
+    filter(., Effect_sq > quantile(Effect_sq, 0.99)) %>%
+    select(., ORF_ID) %>%
+    unlist()
+)
+```
+
+```{r all significant}
+Conc_all <- Reduce(intersect, Conc_ORF)
+```
+
+```{r pairwise}
+ADDMI_ADG_Conc <- setdiff(intersect(Conc_ORF$top_Conc_ADDMI, Conc_ORF$top_Conc_ADG), Conc_all)
+ADDMI_FtG_Conc <- setdiff(intersect(Conc_ORF$top_Conc_ADDMI, Conc_ORF$top_Conc_FtG), Conc_all)
+ADG_FtG_Conc <- setdiff(intersect(Conc_ORF$top_Conc_ADG, Conc_ORF$top_Conc_FtG), Conc_all)
+```
+
+```{r Venn}
+ggvenn(Conc_ORF)
+```
+
+###Forage
+Finally, we can look at the ORF which are significant for multiple traits in forage-fed animals.
+```{r significant ORF}
+Forage_ORF = list(
+  top_Forage_ADDMI = Forage_ADDMI_ORF_Eff %>%
+    arrange(., desc(Effect_sq)) %>%
+    filter(., Effect_sq > quantile(Effect_sq, 0.99)) %>%
+    select(., ORF_ID) %>%
+    unlist()
+  ,
+  top_Forage_ADG = Forage_ADG_ORF_Eff %>%
+    arrange(., desc(Effect_sq)) %>%
+    filter(., Effect_sq > quantile(Effect_sq, 0.99)) %>%
+    select(., ORF_ID) %>%
+    unlist()
+  ,
+  top_Forage_FtG = Forage_FtG_ORF_Eff %>%
+    arrange(., desc(Effect_sq)) %>%
+    filter(., Effect_sq > quantile(Effect_sq, 0.99)) %>%
+    select(., ORF_ID) %>%
+    unlist()
+)
+```
+
+```{r all significant}
+Forage_all <- Reduce(intersect, Forage_ORF)
+```
+
+```{r pairwise}
+ADDMI_ADG_Forage <- setdiff(intersect(Forage_ORF$top_Forage_ADDMI, Forage_ORF$top_Forage_ADG), Forage_all)
+ADDMI_FtG_Forage <- setdiff(intersect(Forage_ORF$top_Forage_ADDMI, Forage_ORF$top_Forage_FtG), Forage_all)
+ADG_FtG_Forage <- setdiff(intersect(Forage_ORF$top_Forage_ADG, Forage_ORF$top_Forage_FtG), Forage_all)
+```
+
+```{r Venn}
+ggvenn(Forage_ORF)
+```
+
+##Significant ORF overlap within trait between sets
+We looked at which ORF are significant to different traits with a given diet set. Now we look at which ORF are significant for the same trait between diet sets. This should illuminate similarities and differences between rumen metagenomes when given different primary substrates.
+
+###ADDMI
+We're going to start with ADDMI and follow a sequence of code that is very similar to what we were doing before. Significant ORF are still those with a squared effect in the top 1% for a given trait/set combination.
+```{r significant ORF}
+ADDMI_ORF = list(
+top_Full_ADDMI = Full_ADDMI_ORF_Eff %>%
+  arrange(., desc(Effect_sq)) %>%
+  filter(., Effect_sq > quantile(Effect_sq, 0.99)) %>%
+  select(., ORF_ID) %>%
+  unlist()
+,
+top_Conc_ADDMI = Conc_ADDMI_ORF_Eff %>%
+  arrange(., desc(Effect_sq)) %>%
+  filter(., Effect_sq > quantile(Effect_sq, 0.99)) %>%
+  select(., ORF_ID) %>%
+  unlist()
+,
+top_Forage_ADDMI = Forage_ADDMI_ORF_Eff %>%
+  arrange(., desc(Effect_sq)) %>%
+  filter(., Effect_sq > quantile(Effect_sq, 0.99)) %>%
+  select(., ORF_ID) %>%
+  unlist()
+)
+```
+
+```{r all significant}
+ADDMI_all <- Reduce(intersect, ADDMI_ORF)
+```
+
+```{r pairwise}
+Full_Conc_ADDMI <- setdiff(intersect(ADDMI_ORF$top_Full_ADDMI, ADDMI_ORF$top_Conc_ADDMI), ADDMI_all)
+Full_Forage_ADDMI <- setdiff(intersect(ADDMI_ORF$top_Full_ADDMI, ADDMI_ORF$top_Forage_ADDMI), ADDMI_all)
+Conc_Forage_ADDMI <- setdiff(intersect(ADDMI_ORF$top_Conc_ADDMI, ADDMI_ORF$top_Forage_ADDMI), ADDMI_all)
+```
+
+```{r Venn}
+ggvenn(ADDMI_ORF)
+```
+
+###ADG
+Repeat with the remaining traits.
+```{r signifcant ORF}
+ADG_ORF = list(
+  top_Full_ADG = Full_ADG_ORF_Eff %>%
+    arrange(., desc(Effect_sq)) %>%
+    filter(., Effect_sq > quantile(Effect_sq, 0.99)) %>%
+    select(., ORF_ID) %>%
+    unlist()
+  ,
+  top_Conc_ADG = Conc_ADG_ORF_Eff %>%
+    arrange(., desc(Effect_sq)) %>%
+    filter(., Effect_sq > quantile(Effect_sq, 0.99)) %>%
+    select(., ORF_ID) %>%
+    unlist()
+  ,
+  top_Forage_ADG = Forage_ADG_ORF_Eff %>%
+    arrange(., desc(Effect_sq)) %>%
+    filter(., Effect_sq > quantile(Effect_sq, 0.99)) %>%
+    select(., ORF_ID) %>%
+    unlist()
+)
+```
+
+```{r all significant}
+ADG_all <- Reduce(intersect, ADG_ORF)
+```
+
+```{r pairwise}
+Full_Conc_ADG <- setdiff(intersect(ADG_ORF$top_Full_ADG, ADG_ORF$top_Conc_ADG), ADG_all)
+Full_Forage_ADG <- setdiff(intersect(ADG_ORF$top_Full_ADG, ADG_ORF$top_Forage_ADG), ADG_all)
+Conc_Forage_ADG <- setdiff(intersect(ADG_ORF$top_Conc_ADG, ADG_ORF$top_Forage_ADG), ADG_all)
+```
+
+```{r Venn}
+ggvenn(ADG_ORF)
+```
+
+###FtG
+```{r significant ORF}
+FtG_ORF = list(
+  top_Full_FtG = Full_FtG_ORF_Eff %>%
+    arrange(., desc(Effect_sq)) %>%
+    filter(., Effect_sq > quantile(Effect_sq, 0.99)) %>%
+    select(., ORF_ID) %>%
+    unlist()
+  ,
+  top_Conc_FtG = Conc_FtG_ORF_Eff %>%
+    arrange(., desc(Effect_sq)) %>%
+    filter(., Effect_sq > quantile(Effect_sq, 0.99)) %>%
+    select(., ORF_ID) %>%
+    unlist()
+  ,
+  top_Forage_FtG = Forage_FtG_ORF_Eff %>%
+    arrange(., desc(Effect_sq)) %>%
+    filter(., Effect_sq > quantile(Effect_sq, 0.99)) %>%
+    select(., ORF_ID) %>%
+    unlist()
+)
+```
+
+```{r all significant}
+FtG_all <- Reduce(intersect, FtG_ORF)
+```
+
+```{r pairwise}
+Full_Conc_FtG <- setdiff(intersect(FtG_ORF$top_Full_FtG, FtG_ORF$top_Conc_FtG), FtG_all)
+Full_Forage_FtG <- setdiff(intersect(FtG_ORF$top_Full_FtG, FtG_ORF$top_Forage_FtG), FtG_all)
+Conc_Forage_FtG <- setdiff(intersect(FtG_ORF$top_Conc_FtG, FtG_ORF$top_Forage_FtG), FtG_all)
+```
+
+```{r Venn}
+ggvenn(FtG_ORF)
+```
+
+##Converse Effects
+Both ADDMI and ADG are economically important traits in the beef industry. More efficient animals eat less but grow more. One way to identify ORF that are associated with feed efficiency is what we have already done with feed-to-gain and identifying ORF with significant effects on that. Another way to do this is to identify ORF with strong effects for both ADDMI and ADG, but have the opposite sign.
+We are going to call these converse ORF.
+
+A converse ORF that would be suitable for positive selection or as a probiotic would have a positive effect for ADG and a negative effect for ADDMI. A converse ORF suitable for selection against would have a negative effect on ADG and a positive effect on ADDMI.
+
+Since we are looking at the effect of each ORF on two traits simultaneously, we are restricted to looking within one diet set at a time.
+
+###Full
+Since we need both positive and negative effects, we are going to be looking at the effect sizes directly, rather than the squared effects as above.
+To determine what is significant to a trait, we are going to be focusing on ORF that have an effect 3 or more standard deviations away from the mean effect (0). We can do this quickly by calculating Z-scores and filtering to those with extreme effects.
+
+```{r ORF Z-scores}
+Full_ADDMI_ORF_Eff$Effect_Z = scale(Full_ADDMI_ORF_Eff$Effect) %>%
+  as.vector()
+converse_Full_ADDMI = Full_ADDMI_ORF_Eff %>%
+  filter(., abs(Effect_Z) > 3) %>%
+  select(., c(ORF_ID, Effect, Effect_Z))
+colnames(converse_Full_ADDMI) = c("ORF_ID", "ADDMI_Effect", "ADDMI_Effect_Z")
+
+Full_ADG_ORF_Eff$Effect_Z = scale(Full_ADG_ORF_Eff$Effect) %>%
+  as.vector()
+converse_Full_ADG = Full_ADG_ORF_Eff %>%
+  filter(., abs(Effect_Z) > 3) %>%
+  select(., c(ORF_ID, Effect, Effect_Z))
+colnames(converse_Full_ADG) = c("ORF_ID", "ADG_Effect", "ADG_Effect_Z")
+```
+ 
+Then we merge the large effect ORF from each trait together to find if any ORF are in common.
+```{r merge extremes}
+converse_Full = merge(converse_Full_ADDMI, converse_Full_ADG)
+```
+
+That gets us a list of ORF which are extreme for both traits, but not the ORF with converse effects for both traits. What we can do to find those is multiple the ORF effect on ADDMI and ADG together.
+Since the only way to have a negative product is if a positive was multipled by a negative, we can find converse ORF by filtering to keep only negative products.
+```{r filter to converse}
+converse_Full = converse_Full[converse_Full$ADDMI_Effect_Z * converse_Full$ADG_Effect_Z < 0, ]
+rm(converse_Full_ADDMI, converse_Full_ADG)
+converse_Full
+```
+
+And there we go, ORF with converse effects on ADDMI and ADG for the Full set. Then it's just repeating that process for the Concentrate and Forage sets.
+
+###Concentrate
+```{r ORF Z-scores}
+Conc_ADDMI_ORF_Eff$Effect_Z = scale(Conc_ADDMI_ORF_Eff$Effect) %>%
+  as.vector()
+converse_Conc_ADDMI = Conc_ADDMI_ORF_Eff %>%
+  filter(., abs(Effect_Z) > 3) %>%
+  select(., c(ORF_ID, Effect, Effect_Z))
+colnames(converse_Conc_ADDMI) = c("ORF_ID", "ADDMI_Effect", "ADDMI_Effect_Z")
+
+Conc_ADG_ORF_Eff$Effect_Z = scale(Conc_ADG_ORF_Eff$Effect) %>%
+  as.vector()
+converse_Conc_ADG = Conc_ADG_ORF_Eff %>%
+  filter(., abs(Effect_Z) > 3) %>%
+  select(., c(ORF_ID, Effect, Effect_Z))
+colnames(converse_Conc_ADG) = c("ORF_ID", "ADG_Effect", "ADG_Effect_Z")
+```
+
+```{r merge extremes}
+converse_Conc = merge(converse_Conc_ADDMI, converse_Conc_ADG)
+```
+
+```{r filter to converse}
+converse_Conc = converse_Conc[converse_Conc$ADDMI_Effect_Z * converse_Conc$ADG_Effect_Z < 0, ]
+rm(converse_Conc_ADDMI, converse_Conc_ADG)
+converse_Conc
+```
+
+###Forage
+```{r ORF Z-scores}
+Forage_ADDMI_ORF_Eff$Effect_Z = scale(Forage_ADDMI_ORF_Eff$Effect) %>%
+  as.vector()
+converse_Forage_ADDMI = Forage_ADDMI_ORF_Eff %>%
+  filter(., abs(Effect_Z) > 3) %>%
+  select(., c(ORF_ID, Effect, Effect_Z))
+colnames(converse_Forage_ADDMI) = c("ORF_ID", "ADDMI_Effect", "ADDMI_Effect_Z")
+
+Forage_ADG_ORF_Eff$Effect_Z = scale(Forage_ADG_ORF_Eff$Effect) %>%
+  as.vector()
+converse_Forage_ADG = Forage_ADG_ORF_Eff %>%
+  filter(., abs(Effect_Z) > 3) %>%
+  select(., c(ORF_ID, Effect, Effect_Z))
+colnames(converse_Forage_ADG) = c("ORF_ID", "ADG_Effect", "ADG_Effect_Z")
+```
+
+```{r merge extremes}
+converse_Forage = merge(converse_Forage_ADDMI, converse_Forage_ADG)
+```
+
+```{r filter to converse}
+converse_Forage = converse_Forage[converse_Forage$ADDMI_Effect_Z * converse_Forage$ADG_Effect_Z < 0, ]
+rm(converse_Forage_ADDMI, converse_Forage_ADG)
+converse_Forage
+```
+
+###Plot
+Now that we have all the converse ORF, we can plot them to get a since of how many are favorable vs unfavorable and color-code by diet set.
+
+First, we gather all the data in a single object.
+```{r}
+converse_Full = converse_Full %>%
+  select(., -c(ADDMI_Effect_Z, ADG_Effect_Z))
+converse_Full$Set = "Full"
+
+#converse_Conc = converse_Conc %>%
+#  select(., -c(ADDMI_Effect_Z, ADG_Effect_Z))
+converse_Conc$Set = "Concentrate"
+
+converse_Forage = converse_Forage %>%
+  select(., -c(ADDMI_Effect_Z, ADG_Effect_Z))
+converse_Forage$Set = "Forage"
+
+total_converse = as.data.frame(rbind(converse_Full, converse_Conc, converse_Forage))
+```
+
+Then we can plot.
+```{r}
+library(ggplot2)
+
+ggplot(total_converse, aes(x = ADDMI_Effect, y = ADG_Effect, color = Set)) +
+  geom_point(size = 2, alpha = 0.7) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+  annotate("text", x = min(total_converse$ADDMI_Effect)*0.5,
+                   y = max(total_converse$ADG_Effect)*0.9,
+                   label = "Favorable", fontface = "bold") +
+  annotate("text", x = max(total_converse$ADDMI_Effect)*0.5,
+                   y = min(total_converse$ADG_Effect)*0.9,
+                   label = "Unfavorable", fontface = "bold") +
+  scale_x_continuous(breaks = 0) +
+  scale_y_continuous(breaks = 0) +
+  labs(
+    title = "ORF with Converse Effects",
+    x = "Average Daily Dry Matter Intake",
+    y = "Average Daily Gain"
+  ) +
+  theme_minimal()
+
+```
+
