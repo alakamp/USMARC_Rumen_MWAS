@@ -1,0 +1,1 @@
+This repo contains the code and data necessary to conduct a metagenome-wide association study for economically important traits in beef cattle. Start with MWAS_script.Rmd, which contains code and a guide.
